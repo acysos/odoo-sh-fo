@@ -6,6 +6,7 @@
 # Copyright 2011-2021 Tecnativa - Pedro M. Baeza
 # Copyright 2020 Valentin Vinagre <valent.vinagre@sygel.es>
 # Copyright 2021 Tecnativa - João Marques
+# Copyright 2022 ForgeFlow - Lois Rilo
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
 
 import json
@@ -46,12 +47,6 @@ SII_STATES = [
     ("cancelled_modified", "Cancelled in SII but last modifications not sent"),
 ]
 SII_VERSION = "1.1"
-SII_COUNTRY_CODE_MAPPING = {
-    "RE": "FR",
-    "GP": "FR",
-    "MQ": "FR",
-    "GF": "FR",
-}
 SII_MACRODATA_LIMIT = 100000000.0
 SII_VALID_INVOICE_STATES = ["posted"]
 
@@ -74,19 +69,6 @@ def round_by_keys(elem, search_keys, prec=2):
 
 class AccountMove(models.Model):
     _inherit = "account.move"
-
-    SII_WDSL_MAPPING = {
-        "out_invoice": "l10n_es_aeat_sii.wsdl_out",
-        "out_refund": "l10n_es_aeat_sii.wsdl_out",
-        "in_invoice": "l10n_es_aeat_sii.wsdl_in",
-        "in_refund": "l10n_es_aeat_sii.wsdl_in",
-    }
-    SII_PORT_NAME_MAPPING = {
-        "out_invoice": "SuministroFactEmitidas",
-        "out_refund": "SuministroFactEmitidas",
-        "in_invoice": "SuministroFactRecibidas",
-        "in_refund": "SuministroFactRecibidas",
-    }
 
     def _get_default_type(self):
         context = self.env.context
@@ -233,17 +215,6 @@ class AccountMove(models.Model):
         "The invoice number should start with LC, QZC, QRC, A01 or A02.",
         copy=False,
     )
-    sii_thirdparty_invoice = fields.Boolean(
-        string="SII third-party invoice", copy=False
-    )
-    sii_thirdparty_number = fields.Char(
-        string="SII third-party number",
-        help="[RD 1619/2012] Cumplimiento de la obligación de expedir factura "
-        "por el destinatario o por un tercero.\n"
-        "Se permite notificar de Factura emitida por Terceros mediante el campo "
-        "'Factura de terceros SII' y 'Número de terceros SII'.",
-        copy=False,
-    )
     invoice_jobs_ids = fields.Many2many(
         comodel_name="queue.job",
         column1="invoice_id",
@@ -331,6 +302,16 @@ class AccountMove(models.Model):
             invoice.onchange_fiscal_position_id_l10n_es_aeat_sii()
         return invoice
 
+    def _raise_exception_sii(self, field_name):
+        raise exceptions.UserError(
+            _(
+                "You cannot change the %s of an invoice "
+                "already registered at the SII. You must cancel the "
+                "invoice and create a new one with the correct value"
+            )
+            % field_name
+        )
+
     def write(self, vals):
         """For supplier invoices the SII primary key is the supplier
         VAT/ID Otro and the supplier invoice number. Cannot let change these
@@ -339,35 +320,20 @@ class AccountMove(models.Model):
             lambda x: x.is_invoice() and x.sii_state != "not_sent"
         ):
             if "invoice_date" in vals:
-                raise exceptions.UserError(
-                    _(
-                        "You cannot change the invoice date of an invoice "
-                        "already registered at the SII. You must cancel the "
-                        "invoice and create a new one with the correct date"
-                    )
-                )
-            if invoice.move_type in ["in_invoice", "in refund"]:
+                self._raise_exception_sii(_("invoice date"))
+            elif "thirdparty_number" in vals:
+                self._raise_exception_sii(_("third-party number"))
+            if invoice.move_type in ["in_invoice", "in_refund"]:
                 if "partner_id" in vals:
                     correct_partners = invoice._sii_get_partner()
                     correct_partners |= correct_partners.child_ids
                     if vals["partner_id"] not in correct_partners.ids:
-                        raise exceptions.UserError(
-                            _(
-                                "You cannot change the supplier of an invoice "
-                                "already registered at the SII. You must cancel "
-                                "the invoice and create a new one with the "
-                                "correct supplier"
-                            )
-                        )
+                        self._raise_exception_sii(_("supplier"))
                 elif "ref" in vals:
-                    raise exceptions.UserError(
-                        _(
-                            "You cannot change the supplier invoice number of "
-                            "an invoice already registered at the SII. You must "
-                            "cancel the invoice and create a new one with the "
-                            "correct number"
-                        )
-                    )
+                    self._raise_exception_sii(_("supplier invoice number"))
+            elif invoice.move_type in ["out_invoice", "out_refund"]:
+                if "name" in vals:
+                    self._raise_exception_sii(_("invoice number"))
         # Fill sii_refund_type if not set previously. It happens on sales
         # order invoicing process for example.
         if (
@@ -806,8 +772,8 @@ class AccountMove(models.Model):
         periodo = "%02d" % fields.Date.to_date(self.date).month
         is_simplified_invoice = self._is_sii_simplified_invoice()
         serial_number = (self.name or "")[0:60]
-        if self.sii_thirdparty_invoice:
-            serial_number = self.sii_thirdparty_number[0:60]
+        if self.thirdparty_invoice:
+            serial_number = self.thirdparty_number[0:60]
         inv_dict = {
             "IDFactura": {
                 "IDEmisorFactura": {"NIF": company.vat[2:]},
@@ -827,7 +793,7 @@ class AccountMove(models.Model):
                 "TipoDesglose": tipo_desglose,
                 "ImporteTotal": amount_total,
             }
-            if self.sii_thirdparty_invoice:
+            if self.thirdparty_invoice:
                 inv_dict["FacturaExpedida"]["EmitidaPorTercerosODestinatario"] = "S"
             if self.sii_macrodata:
                 inv_dict["FacturaExpedida"].update(Macrodato="S")
@@ -990,19 +956,14 @@ class AccountMove(models.Model):
 
     def _connect_params_sii(self, mapping_key):
         self.ensure_one()
-        params = {
-            "wsdl": self.env["ir.config_parameter"]
-            .sudo()
-            .get_param(self.SII_WDSL_MAPPING[mapping_key], False),
-            "port_name": self.SII_PORT_NAME_MAPPING[mapping_key],
-            "address": False,
-        }
-        agency = self.company_id.sii_tax_agency_id
-        if agency:
-            params.update(agency._connect_params_sii(mapping_key, self.company_id))
-        if not params["address"] and self.company_id.sii_test:
-            params["port_name"] += "Pruebas"
-        return params
+        agency = self.company_id.tax_agency_id
+        if not agency:
+            # We use spanish agency by default to keep old behavior with
+            # ir.config parameters. In the future it might be good to reinforce
+            # to explicitly set a tax agency in the company by raising an error
+            # here.
+            agency = self.env.ref("l10n_es_aeat.aeat_tax_agency_spain")
+        return agency._connect_params_sii(mapping_key, self.company_id)
 
     def _connect_sii(self, mapping_key):
         self.ensure_one()
@@ -1305,43 +1266,53 @@ class AccountMove(models.Model):
         """
         self.ensure_one()
         gen_type = self._get_sii_gen_type()
-        partner = self._sii_get_partner()
+        (
+            country_code,
+            identifier_type,
+            identifier,
+        ) = self._sii_get_partner()._parse_aeat_vat_info()
         # Limpiar alfanum
-        if partner.vat:
-            vat = "".join(e for e in partner.vat if e.isalnum()).upper()
+        if identifier:
+            identifier = "".join(e for e in identifier if e.isalnum()).upper()
         else:
-            vat = "NO_DISPONIBLE"
-        country_code = self._get_sii_country_code()
+            identifier = "NO_DISPONIBLE"
+            identifier_type = "06"
         if gen_type == 1:
             if "1117" in (self.sii_send_error or ""):
                 return {
                     "IDOtro": {
                         "CodigoPais": country_code,
                         "IDType": "07",
-                        "ID": vat[2:],
+                        "ID": identifier,
                     }
                 }
             else:
-                if country_code != "ES":
-                    id_type = "06" if vat == "NO_DISPONIBLE" else "04"
-                    return {
-                        "IDOtro": {
-                            "CodigoPais": country_code,
-                            "IDType": id_type,
-                            "ID": vat,
-                        },
-                    }
-                else:
-                    return {"NIF": vat[2:]}
+                if identifier_type == "":
+                    return {"NIF": identifier}
+                return {
+                    "IDOtro": {
+                        "CodigoPais": country_code,
+                        "IDType": identifier_type,
+                        "ID": country_code + identifier
+                        if self.commercial_partner_id._map_aeat_country_code(
+                            country_code
+                        )
+                        in self.commercial_partner_id._get_aeat_europe_codes()
+                        else identifier,
+                    },
+                }
         elif gen_type == 2:
-            return {"IDOtro": {"IDType": "02", "ID": vat}}
-        elif gen_type == 3 and country_code != "ES":
-            id_type = "06" if vat == "NO_DISPONIBLE" else "04"
+            return {"IDOtro": {"IDType": "02", "ID": country_code + identifier}}
+        elif gen_type == 3 and identifier_type:
             return {
-                "IDOtro": {"CodigoPais": country_code, "IDType": id_type, "ID": vat},
+                "IDOtro": {
+                    "CodigoPais": country_code,
+                    "IDType": identifier_type,
+                    "ID": identifier,
+                },
             }
         elif gen_type == 3:
-            return {"NIF": vat[2:]}
+            return {"NIF": identifier}
 
     def _get_sii_exempt_cause(self, applied_taxes):
         """Código de la causa de exención según 3.6 y 3.7 de la FAQ del SII.
@@ -1397,9 +1368,7 @@ class AccountMove(models.Model):
 
     def _get_sii_country_code(self):
         self.ensure_one()
-        partner = self._sii_get_partner()
-        country_code = (partner.country_id.code or (partner.vat or "")[:2]).upper()
-        return SII_COUNTRY_CODE_MAPPING.get(country_code, country_code)
+        return self._sii_get_partner()._parse_aeat_vat_info()[0]
 
     @api.depends(
         "invoice_line_ids",

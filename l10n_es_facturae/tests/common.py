@@ -10,6 +10,7 @@ from lxml import etree
 from mock import patch
 
 from odoo import exceptions, fields
+from odoo.tools.misc import mute_logger
 
 from odoo.addons.l10n_es_aeat.tests.test_l10n_es_aeat_certificate import (
     TestL10nEsAeatCertificateBase,
@@ -94,7 +95,9 @@ class CommonTest(TestL10nEsAeatCertificateBase):
                 "type": "bank",
                 "company_id": main_company.id,
                 "bank_account_id": self.bank.id,
-                "inbound_payment_method_line_ids": [(6, 0, payment_methods.ids)],
+                "inbound_payment_method_line_ids": [
+                    (0, 0, {"payment_method_id": x.id}) for x in payment_methods
+                ],
             }
         )
 
@@ -341,7 +344,9 @@ class CommonTest(TestL10nEsAeatCertificateBase):
         self.main_company.partner_id.country_id = False
         self.move.action_post()
         self.move.name = "2999/99999"
-        with self.assertRaises(exceptions.UserError):
+        with self.assertRaises(exceptions.UserError), mute_logger(
+            "odoo.addons.l10n_es_facturae.reports.report_facturae"
+        ):
             self.wizard.with_context(
                 active_ids=self.move.ids, active_model="account.move"
             ).create_facturae_file()
@@ -633,12 +638,3 @@ class CommonTest(TestL10nEsAeatCertificateBase):
             }
         )
         self._check_amounts(move, *self.second_check_amount)
-
-    def test_account_move_thirdparty_fields(self):
-        view = self.env["account.move"].fields_view_get(
-            view_id=self.env.ref("account.view_move_form").id,
-            view_type="form",
-        )
-        doc = etree.XML(view["arch"])
-        self.assertTrue(doc.xpath("//field[@name='thirdparty_number']"))
-        self.assertTrue(doc.xpath("//field[@name='thirdparty_invoice']"))

@@ -97,6 +97,30 @@ be found on GitHub.
 Changelog
 =========
 
+15.0.4.1.2 (2022-11-15)
+~~~~~~~~~~~~~~~~~~~~~~~
+
+**Bugfixes**
+
+- Fix access error when previewing or printing report. (`#415 <https://github.com/OCA/mis-builder/issues/415>`_)
+
+
+15.0.4.0.5 (2022-07-19)
+~~~~~~~~~~~~~~~~~~~~~~~
+
+**Bugfixes**
+
+- Support users without timezone. (`#388 <https://github.com/OCA/mis-builder/issues/388>`_)
+
+
+15.0.4.0.4 (2022-07-19)
+~~~~~~~~~~~~~~~~~~~~~~~
+
+**Bugfixes**
+
+- Allow deleting a report that has subreports. (`#431 <https://github.com/OCA/mis-builder/issues/431>`_)
+
+
 15.0.4.0.2 (2022-02-16)
 ~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -609,6 +633,7 @@ Contributors
 * `CorporateHub <https://corporatehub.eu/>`__
 
   * Alexey Pelykh <alexey.pelykh@corphub.eu>
+* Jairo Llopis (https://www.moduon.team/)
 
 Maintainers
 ~~~~~~~~~~~
